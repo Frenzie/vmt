@@ -2,6 +2,12 @@ import discord
 from discord.ext import commands
 import json
 import os
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 with open("config/config.json") as conf_file:
     config = json.load(conf_file)

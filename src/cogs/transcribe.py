@@ -10,6 +10,8 @@ import typing
 import asyncio
 import tempfile
 import re
+import time
+import logging
 
 import discord
 from discord.ext import commands
@@ -17,12 +19,18 @@ from faster_whisper import WhisperModel
 import pydub
 
 
+logger = logging.getLogger(__name__)
+
+
 class Transcriber(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = self.load_config()
-        # Initialize tiny model once; compute_type auto selects best (fp16 on GPU else int8).
-        self.model = WhisperModel("small", compute_type="auto")
+        # Initialize model once; compute_type auto selects best (fp16 on GPU else int8).
+        model_name = os.environ.get("WHISPER_MODEL", "small")
+        t0 = time.perf_counter()
+        self.model = WhisperModel(model_name, compute_type="auto")
+        logger.info("Loaded Whisper model '%s' in %.2fs", model_name, time.perf_counter() - t0)
 
     def load_config(self):
         try:
@@ -68,10 +76,18 @@ class Transcriber(commands.Cog):
 
         author = replied_message.author
         await interaction.response.defer(thinking=True)
+        started = time.perf_counter()
+        logger.info(
+            "[slash] guild=%s channel=%s user=%s target_msg=%s starting transcription",
+            getattr(interaction.guild, 'id', None),
+            getattr(interaction.channel, 'id', None),
+            interaction.user.id,
+            replied_message.id,
+        )
         try:
             transcribed_text = await transcribe_msg(replied_message, self.model)
-        except Exception as e:
-            print(e)
+        except Exception:
+            logger.exception("Transcription failed (slash) message_id=%s", replied_message.id)
             await interaction.followup.send(f"Failed to transcribe VM from {author}.", ephemeral=True)
             return
         content, file = build_transcription_message(transcribed_text, replied_message, interaction.user)
@@ -81,29 +97,48 @@ class Transcriber(commands.Cog):
             else:
                 await replied_message.reply(content=content, mention_author=False)
             await interaction.followup.send("Transcription posted.")
+            logger.info(
+                "[slash] completed message_id=%s chars=%d attach=%s elapsed=%.2fs",
+                replied_message.id,
+                len(transcribed_text),
+                bool(file),
+                time.perf_counter() - started,
+            )
         except discord.Forbidden:
             if file:
                 await interaction.followup.send(content=content, file=file)
             else:
                 await interaction.followup.send(content=content)
+            logger.warning(
+                "[slash] fallback (Forbidden) posted via interaction followup message_id=%s", replied_message.id
+            )
 
     # (Context menu moved outside class due to context menu decorator constraints)
 
     @commands.Cog.listener("on_message")
     async def auto_transcribe(self, msg: discord.Message):
-        print("Received message:", msg)
+        logger.debug("on_message id=%s author=%s", msg.id, msg.author.id)
         if not msg_has_voice_note(msg):
             return
         await msg.add_reaction("\N{HOURGLASS}")
         try:
+            started = time.perf_counter()
             text = await transcribe_msg(msg, self.model)
             content, file = build_transcription_message(text, msg)
             if file:
                 await msg.reply(content=content, file=file)
             else:
                 await msg.reply(content=content)
-        except Exception as e:
-            print(e)
+            logger.info(
+                "[auto] message_id=%s author=%s chars=%d attach=%s elapsed=%.2fs",
+                msg.id,
+                msg.author.id,
+                len(text),
+                bool(file),
+                time.perf_counter() - started,
+            )
+        except Exception:
+            logger.exception("Auto transcription failed message_id=%s", msg.id)
             await msg.reply(content=f"Could not transcribe the Voice Message from {msg.author}.")
         finally:
             try:
@@ -176,6 +211,7 @@ def msg_has_voice_note(msg: typing.Optional[discord.Message]) -> bool:
 
 async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> str:
     # Read attachment bytes
+    t0 = time.perf_counter()
     voice_msg_bytes = await msg.attachments[0].read()
     voice_msg = io.BytesIO(voice_msg_bytes)
     # Convert to wav temp file for model
@@ -195,6 +231,14 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> str:
             os.remove(tmp_path)
         except OSError:
             pass
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "[core] transcribed message_id=%s duration=%.2fs bytes=%d chars=%d",
+        msg.id,
+        elapsed,
+        len(voice_msg_bytes),
+        len(text),
+    )
     return text or "(empty transcription)"
 
 
@@ -221,6 +265,7 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
     except discord.InteractionResponded:
         pass
     try:
+        started = time.perf_counter()
         text = await transcribe_msg(message, cog.model)
         content, file = build_transcription_message(text, message, interaction.user)
         try:
@@ -229,13 +274,23 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
             else:
                 await message.reply(content=content, mention_author=False)
             await interaction.followup.send("Transcription posted under the original voice message.")
+            logger.info(
+                "[context] completed message_id=%s chars=%d attach=%s elapsed=%.2fs",
+                message.id,
+                len(text),
+                bool(file),
+                time.perf_counter() - started,
+            )
         except discord.Forbidden:
             if file:
                 await interaction.followup.send(content=content, file=file)
             else:
                 await interaction.followup.send(content=content)
-    except Exception as e:
-        print(e)
+            logger.warning(
+                "[context] Forbidden replying under message_id=%s; used followup", message.id
+            )
+    except Exception:
+        logger.exception("Context menu transcription failed message_id=%s", message.id)
         await interaction.followup.send("Failed to transcribe that voice message.", ephemeral=True)
 
 
