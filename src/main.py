@@ -6,14 +6,11 @@ import os
 with open("config/config.json") as conf_file:
     config = json.load(conf_file)
     bot_token = config["token"]
-    bot_prefix = config["prefix"]
 
 
 class Bot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix=bot_prefix, intents=discord.Intents.all())
-        # remove the default help command
-        self.remove_command("help")
+        super().__init__(command_prefix=None, intents=discord.Intents.all())
 
     async def setup_hook(self) -> None:
         cogsLoaded = 0
@@ -27,10 +24,15 @@ class Bot(commands.Bot):
                     cogsLoaded += 1
                 except Exception as e:
                     print(f"Failed to load cog {cog_file}: {e}")
-        print(f"Loaded {cogsLoaded}/{cogsCount} cogs.")
+        print(f"Loaded {cogsLoaded}/{cogsCount} cogs. Syncing application commands...")
+        try:
+            synced = await self.tree.sync()
+            print(f"Synced {len(synced)} application commands.")
+        except Exception as e:
+            print(f"Failed to sync application commands: {e}")
 
     async def on_ready(self):
-        print("Bot is ready.")
+        print("Application is ready.")
 
 
 bot = Bot()

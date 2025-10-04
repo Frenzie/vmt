@@ -10,6 +10,7 @@ import typing
 import asyncio
 import tempfile
 import textwrap
+import re
 
 import discord
 from discord.ext import commands
@@ -31,38 +32,62 @@ class Transcriber(commands.Cog):
         except FileNotFoundError:
             return {"prefix": "vmt "}
 
-    @commands.command(aliases=["t"])  # minimal alias retained
-    async def transcribe(self, ctx: commands.Context):
-        """Transcribe a replied-to Discord voice message (or the most recent one)."""
-        replied_message = None
-        if ctx.message.reference:
-            replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-
-        if not msg_has_voice_note(replied_message):
-            async for message in ctx.channel.history(limit=50, oldest_first=False):
-                if message.author != ctx.bot.user and msg_has_voice_note(message):
-                    replied_message = message
-                    break
-
+    @discord.app_commands.command(name="transcribe", description="Transcribe a Discord voice message (optionally pass a message link/ID)")
+    @discord.app_commands.describe(target="Optional message link or ID of the voice message")
+    async def slash_transcribe(self, interaction: discord.Interaction, target: typing.Optional[str] = None):
+        # 1. If target provided, attempt to resolve directly
+        replied_message: typing.Optional[discord.Message] = None
+        if target:
+            replied_message = await resolve_target_message(interaction, target)
+            if replied_message and not msg_has_voice_note(replied_message):
+                await interaction.response.send_message("Provided message is not a voice message.")
+                return
+        # 2. If still none, attempt recent history scan (requires permission)
         if not replied_message:
-            await ctx.reply("No voice message found (reply to one or ensure recent VM exists).")
+            channel = interaction.channel
+            if hasattr(channel, "history"):
+                can_history = True
+                if interaction.guild and interaction.guild.me:
+                    perms = channel.permissions_for(interaction.guild.me)  # type: ignore
+                    if hasattr(perms, 'read_message_history') and not perms.read_message_history:
+                        can_history = False
+                if can_history:
+                    try:
+                        async for message in channel.history(limit=50, oldest_first=False):  # type: ignore[attr-defined]
+                            if message.author != interaction.client.user and msg_has_voice_note(message):  # type: ignore
+                                replied_message = message
+                                break
+                    except discord.Forbidden:
+                        pass
+        # 3. If still none, respond with guidance
+        if not replied_message:
+            guidance = (
+                "No voice message found. Provide a message link/ID or grant 'Read Message History'."
+            )
+            await interaction.response.send_message(guidance)
             return
 
         author = replied_message.author
-        response = await ctx.reply(f"Transcribing the Voice Message from {author}...")
+        await interaction.response.defer(thinking=True)
         try:
             transcribed_text = await transcribe_msg(replied_message, self.model)
-            await response.delete()
         except Exception as e:
-            await response.edit(content=f"Failed to transcribe VM from {author}.")
             print(e)
+            await interaction.followup.send(f"Failed to transcribe VM from {author}.", ephemeral=True)
             return
 
-        embed = make_embed(transcribed_text, author, ctx.author)
-        await replied_message.reply(embed=embed, mention_author=False)
+        embed = make_embed(transcribed_text, author, interaction.user)
+        try:
+            await replied_message.reply(embed=embed, mention_author=False)
+            await interaction.followup.send("Transcription posted.")
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed)
+
+    # (Context menu moved outside class due to context menu decorator constraints)
 
     @commands.Cog.listener("on_message")
     async def auto_transcribe(self, msg: discord.Message):
+        print("Received message:", msg.id, "from", msg.author)
         if not msg_has_voice_note(msg):
             return
         await msg.add_reaction("\N{HOURGLASS}")
@@ -132,4 +157,58 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> str:
 
 
 async def setup(bot):
-    await bot.add_cog(Transcriber(bot))
+    transcriber = Transcriber(bot)
+    await bot.add_cog(transcriber)
+    # Add context menu at tree level referencing handler
+    if not any(cmd.name == "Transcribe Voice Message" for cmd in bot.tree.get_commands()):
+        bot.tree.add_command(context_transcribe)
+
+
+@discord.app_commands.context_menu(name="Transcribe Voice Message")
+async def context_transcribe(interaction: discord.Interaction, message: discord.Message):
+    # Lookup Transcriber cog to reuse model
+    cog: typing.Optional[Transcriber] = interaction.client.get_cog("Transcriber")  # type: ignore
+    if not cog:
+        await interaction.response.send_message("Transcriber unavailable.")
+        return
+    if not msg_has_voice_note(message):
+        await interaction.response.send_message("Selected message is not a Discord voice message.")
+        return
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.InteractionResponded:
+        pass
+    try:
+        text = await transcribe_msg(message, cog.model)
+        embed = make_embed(text, message.author, interaction.user)
+        try:
+            await message.reply(embed=embed, mention_author=False)
+            await interaction.followup.send("Transcription posted under the original voice message.")
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed)
+    except Exception as e:
+        print(e)
+        await interaction.followup.send("Failed to transcribe that voice message.", ephemeral=True)
+
+
+MESSAGE_LINK_RE = re.compile(r"https://(?:ptb\.|canary\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)")
+
+
+async def resolve_target_message(interaction: discord.Interaction, raw: str) -> typing.Optional[discord.Message]:
+    raw = raw.strip()
+    # Message link form
+    m = MESSAGE_LINK_RE.match(raw)
+    try:
+        if m:
+            guild_id, channel_id, message_id = map(int, m.groups())
+            # Security: must be same guild (if guild interaction)
+            if interaction.guild and interaction.guild.id != guild_id:
+                return None
+            channel = interaction.client.get_channel(channel_id) or await interaction.client.fetch_channel(channel_id)  # type: ignore
+            return await channel.fetch_message(message_id)  # type: ignore
+        # Bare numeric ID (assume same channel)
+        if raw.isdigit() and hasattr(interaction.channel, 'fetch_message'):
+            return await interaction.channel.fetch_message(int(raw))  # type: ignore
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+    return None
