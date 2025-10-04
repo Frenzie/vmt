@@ -34,18 +34,35 @@ class Transcriber(commands.Cog):
     @commands.hybrid_command(name="transcribe", aliases=["t"], description="Transcribe a Discord voice message to text")
     async def transcribe(self, ctx: commands.Context):
         """Transcribe a replied-to Discord voice message (or the most recent one)."""
-        replied_message = None
-        if ctx.message.reference:
-            replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        replied_message: typing.Optional[discord.Message] = None
+        # If user replied to a message, try fetching it (guarding for perms / deletion)
+        if getattr(ctx, "message", None) and ctx.message.reference:
+            try:
+                replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                replied_message = None
 
+        # Fallback scan only if we still haven't got a valid voice note
         if not msg_has_voice_note(replied_message):
-            async for message in ctx.channel.history(limit=50, oldest_first=False):
-                if message.author != ctx.bot.user and msg_has_voice_note(message):
-                    replied_message = message
-                    break
+            can_history = True
+            if ctx.guild:
+                me = ctx.guild.me
+                if me:
+                    try:
+                        perms = ctx.channel.permissions_for(me)  # type: ignore
+                        if hasattr(perms, 'read_message_history') and not perms.read_message_history:
+                            can_history = False
+                    except Exception:
+                        can_history = False
+            if can_history:
+                replied_message = await find_recent_voice_message(ctx.channel, ctx.bot.user, limit=50)
 
         if not replied_message:
-            await ctx.reply("No voice message found (reply to one or ensure recent VM exists).")
+            notice = "No accessible voice message found. Reply to a voice note or grant 'Read Message History'."
+            if getattr(ctx, "interaction", None) and not ctx.interaction.response.is_done():
+                await ctx.interaction.response.send_message(notice, ephemeral=True)
+            else:
+                await ctx.reply(notice)
             return
 
         author = replied_message.author
@@ -111,6 +128,24 @@ def msg_has_voice_note(msg: typing.Optional[discord.Message]) -> bool:
     if not msg.attachments or not msg.flags.value >> 13:
         return False
     return True
+
+
+async def find_recent_voice_message(channel: discord.abc.Messageable, bot_user: discord.User, limit: int = 50) -> typing.Optional[discord.Message]:
+    """Scan channel history for the newest voice message not authored by the bot.
+
+    Returns None if permission is missing or nothing found. Any Forbidden / HTTP errors are swallowed.
+    """
+    if not hasattr(channel, "history"):
+        return None
+    try:
+        async for message in channel.history(limit=limit, oldest_first=False):  # type: ignore[attr-defined]
+            if message.author != bot_user and msg_has_voice_note(message):
+                return message
+    except discord.Forbidden:
+        return None
+    except discord.HTTPException:
+        return None
+    return None
 
 
 async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> str:
