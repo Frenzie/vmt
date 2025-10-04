@@ -22,7 +22,7 @@ class Transcriber(commands.Cog):
         self.bot = bot
         self.config = self.load_config()
         # Initialize tiny model once; compute_type auto selects best (fp16 on GPU else int8).
-        self.model = WhisperModel("tiny", compute_type="auto")
+        self.model = WhisperModel("small", compute_type="auto")
 
     def load_config(self):
         try:
