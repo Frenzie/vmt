@@ -12,11 +12,12 @@ logging.basicConfig(
 with open("config/config.json") as conf_file:
     config = json.load(conf_file)
     bot_token = config["token"]
+    bot_prefix = config["prefix"]
 
 
 class Bot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix=None, intents=discord.Intents.all())
+        super().__init__(command_prefix=bot_prefix, intents=discord.Intents.all())
 
     async def setup_hook(self) -> None:
         cogsLoaded = 0
