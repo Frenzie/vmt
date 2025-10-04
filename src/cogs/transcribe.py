@@ -16,7 +16,6 @@ import logging
 import discord
 from discord.ext import commands
 from faster_whisper import WhisperModel
-import pydub
 
 
 logger = logging.getLogger(__name__)
@@ -221,21 +220,26 @@ def msg_has_voice_note(msg: typing.Optional[discord.Message]) -> bool:
 
 
 async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str, str, float, float]:
-    # Read attachment bytes
+    """Transcribe attachment."""
     t0 = time.perf_counter()
-    voice_msg_bytes = await msg.attachments[0].read()
-    voice_msg = io.BytesIO(voice_msg_bytes)
-    # Convert to wav temp file for model
-    audio_segment = pydub.AudioSegment.from_file(voice_msg)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+    attachment = msg.attachments[0]
+    voice_msg_bytes = await attachment.read()
+    # Pick suffix from original filename (fallback .tmp)
+    base, ext = os.path.splitext(attachment.filename or "")
+    if not ext or len(ext) > 10:
+        ext = ".tmp"
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(voice_msg_bytes)
         tmp_path = tmp.name
-        audio_segment.export(tmp_path, format="wav")
     try:
-        # Run in executor to avoid blocking the event loop
         loop = asyncio.get_event_loop()
         def _run():
             segments, info = model.transcribe(tmp_path, beam_size=5)
-            text_out = " ".join(seg.text.strip() for seg in segments).strip()
+            parts = []
+            for seg in segments:
+                if seg.text:
+                    parts.append(seg.text.strip())
+            text_out = " ".join(parts).strip()
             language_code = getattr(info, 'language', 'unknown')
             duration_sec = getattr(info, 'duration', 0.0)
             language_prob = float(getattr(info, 'language_probability', 0.0) or 0.0)
@@ -248,7 +252,7 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
             pass
     elapsed = time.perf_counter() - t0
     logger.info(
-        "[core] transcribed message_id=%s duration=%.2fs bytes=%d chars=%d lang=%s prob=%.2f audiodur=%.2fs",
+        "[core] transcribed message_id=%s duration=%.2fs bytes=%d chars=%d lang=%s prob=%.2f audiodur=%.2fs direct_input=%s",
         msg.id,
         elapsed,
         len(voice_msg_bytes),
@@ -256,6 +260,7 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
         language_code,
         language_prob,
         duration_sec,
+        ext,
     )
     return (text or "(empty transcription)", language_code, duration_sec, language_prob)
 
