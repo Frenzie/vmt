@@ -12,3 +12,4 @@ requests==2.31.0
 urllib3==2.0.3
 yarl==1.20.1
 faster-whisper==1.2.0
+zhconv==1.4.3
