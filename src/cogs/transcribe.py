@@ -186,7 +186,7 @@ def build_transcription_message(transcribed_text: str, message: discord.Message,
     lang_display = language or "?"
     header_bits = [
         f"{author.name}",
-        f"🌐{lang_display} 🎧{dur_str} (⏱{processing_time:.2f}s)",
+        f"🔤{lang_display} 🗣️{dur_str} (⏱{processing_time:.2f}s)",
         timestamp_str,
         f"{message.jump_url}" if hasattr(message, 'jump_url') else f"{message.id}",
     ]
