@@ -13,8 +13,8 @@ class Help(commands.Cog):
             return json.load(conf_file)
 
     # help command
-    @commands.command(aliases=["h"])
-    async def help(self, ctx):
+    @commands.hybrid_command(name="help", aliases=["h"], description="Show help for bot commands")
+    async def help(self, ctx: commands.Context):
         embed = discord.Embed(
             title="Help Menu",
             description="List of all available commands:",
@@ -34,7 +34,14 @@ class Help(commands.Cog):
         )
 
         embed.set_footer(text=f"Requested by {ctx.author.name}")
-        await ctx.reply(embed=embed)
+        # If invoked as slash, prefer interaction response first
+        if getattr(ctx, "interaction", None):
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.send_message(embed=embed, ephemeral=False)
+            else:
+                await ctx.reply(embed=embed)
+        else:
+            await ctx.reply(embed=embed)
 
 
 async def setup(bot):

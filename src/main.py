@@ -30,7 +30,12 @@ class Bot(commands.Bot):
         print(f"Loaded {cogsLoaded}/{cogsCount} cogs.")
 
     async def on_ready(self):
-        print("Bot is ready.")
+        # Sync application (slash) commands so hybrid commands appear in client UI
+        try:
+            synced = await self.tree.sync()
+            print(f"Bot is ready. Synced {len(synced)} application commands.")
+        except Exception as e:
+            print(f"Bot is ready, but failed to sync application commands: {e}")
 
 
 bot = Bot()

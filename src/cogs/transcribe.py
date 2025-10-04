@@ -31,7 +31,7 @@ class Transcriber(commands.Cog):
         except FileNotFoundError:
             return {"prefix": "vmt "}
 
-    @commands.command(aliases=["t"])  # minimal alias retained
+    @commands.hybrid_command(name="transcribe", aliases=["t"], description="Transcribe a Discord voice message to text")
     async def transcribe(self, ctx: commands.Context):
         """Transcribe a replied-to Discord voice message (or the most recent one)."""
         replied_message = None
@@ -59,7 +59,13 @@ class Transcriber(commands.Cog):
             return
 
         embed = make_embed(transcribed_text, author, ctx.author)
-        await replied_message.reply(embed=embed, mention_author=False)
+        if getattr(ctx, "interaction", None):
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.send_message(embed=embed, ephemeral=False)
+            else:
+                await replied_message.reply(embed=embed, mention_author=False)
+        else:
+            await replied_message.reply(embed=embed, mention_author=False)
 
     @commands.Cog.listener("on_message")
     async def auto_transcribe(self, msg: discord.Message):
