@@ -9,7 +9,6 @@ A Discord bot that locally transcribes Discord Voice Messages (voice notes) to t
 
 - Python 3.8+
 - discord.py
-- pydub + ffmpeg (for audio format conversion)
 - faster-whisper
 
 Run the following:

@@ -6,8 +6,8 @@ These instructions guide AI coding agents contributing to this repository.
 Discord bot that locally transcribes Discord Voice Messages (VMs) to text using `faster-whisper` (tiny model). Core flow:
 1. User triggers `vmt transcribe` (optionally replying to a VM) OR sends a new voice message (auto mode).
 2. Bot locates target voice message (replied-to or most recent in channel).
-3. Audio (OGG/MP3/Discord voice note) → WAV via `pydub`/`ffmpeg`.
-4. WAV fed to `WhisperModel('tiny')` (fast, lightweight). Transcription done off-thread via executor.
+3. Audio (OGG/MP3/Discord voice note) is written directly to a temp file and decoded by ffmpeg inside faster-whisper.
+4. Temp audio fed to `WhisperModel('tiny')` (fast, lightweight). Transcription done off-thread via executor.
 5. Result embedded + posted.
 
 ## Key Files
@@ -43,8 +43,7 @@ This relies on bit-shifting of internal flag integer to infer voice message; tre
 - Empty transcription returns placeholder `(empty transcription)`.
 
 ## External Dependencies
-- `faster-whisper` tiny model for on-device transcription (CPU-friendly; auto chooses compute type).
-- `pydub` + `ffmpeg` for format conversion.
+- `faster-whisper` small model for on-device transcription (CPU-friendly; auto chooses compute type).
 - `discord.py` for bot events/commands.
 - (Legacy) DeepL & SpeechRecognition removed from active code; may purge from dependencies if fully deprecated.
 
