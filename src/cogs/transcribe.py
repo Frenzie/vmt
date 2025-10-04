@@ -16,7 +16,6 @@ import logging
 import discord
 from discord.ext import commands
 from faster_whisper import WhisperModel
-import zhconv
 
 
 logger = logging.getLogger(__name__)
@@ -92,56 +91,29 @@ class Transcriber(commands.Cog):
             logger.exception("Transcription failed (slash) message_id=%s", replied_message.id)
             await interaction.followup.send(f"Failed to transcribe VM from {author}.", ephemeral=True)
             return
-        # Chinese dual-output: send separate simplified & traditional messages if distinct
-        sent_any = False
-        if language == 'zh' and zhconv and transcribed_text.strip() and transcribed_text.strip() != '(empty transcription)':
-            try:
-                simp_full = zhconv.convert(transcribed_text, 'zh-hans')
-                trad_full = zhconv.convert(transcribed_text, 'zh-hant')
-                if simp_full != trad_full:
-                    simp_content, simp_file = build_transcription_message(simp_full, replied_message, language, language_prob, audio_duration, processing_time, interaction.user, variant_label="Simplified 简体")
-                    trad_content, trad_file = build_transcription_message(trad_full, replied_message, language, language_prob, audio_duration, processing_time, interaction.user, variant_label="Traditional 繁體")
-                    if simp_file:
-                        await replied_message.reply(content=simp_content, mention_author=False, file=simp_file)
-                    else:
-                        await replied_message.reply(content=simp_content, mention_author=False)
-                    if trad_file:
-                        await replied_message.reply(content=trad_content, mention_author=False, file=trad_file)
-                    else:
-                        await replied_message.reply(content=trad_content, mention_author=False)
-                    sent_any = True
-            except Exception:
-                logger.exception("Chinese variant split failed message_id=%s", replied_message.id)
+        content, file = build_transcription_message(transcribed_text, replied_message, language, language_prob, audio_duration, processing_time, interaction.user)
         try:
-            file: typing.Optional[discord.File] = None  # ensure defined for logging
-            if not sent_any:
-                content, file = build_transcription_message(transcribed_text, replied_message, language, language_prob, audio_duration, processing_time, interaction.user)
-                if file:
-                    await replied_message.reply(content=content, mention_author=False, file=file)
-                else:
-                    await replied_message.reply(content=content, mention_author=False)
+            if file:
+                await replied_message.reply(content=content, mention_author=False, file=file)
+            else:
+                await replied_message.reply(content=content, mention_author=False)
             await interaction.followup.send("Transcription posted.")
             logger.info(
-                "[slash] completed message_id=%s chars=%d variants=%s attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
+                "[slash] completed message_id=%s chars=%d attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
                 replied_message.id,
                 len(transcribed_text),
-                'dual' if sent_any else 'single',
-                False if sent_any else bool(file),
+                bool(file),
                 time.perf_counter() - started,
                 language,
                 audio_duration,
             )
         except discord.Forbidden:
-            # Fallback: if single variant failed, send via followup; if dual, just note failure.
-            if not sent_any:
-                if file:
-                    await interaction.followup.send(content=content, file=file)
-                else:
-                    await interaction.followup.send(content=content)
+            if file:
+                await interaction.followup.send(content=content, file=file)
             else:
-                await interaction.followup.send("Forbidden replying under original message (variants suppressed)")
+                await interaction.followup.send(content=content)
             logger.warning(
-                "[slash] Forbidden replying under message_id=%s variants=%s", replied_message.id, 'dual' if sent_any else 'single'
+                "[slash] fallback (Forbidden) posted via interaction followup message_id=%s", replied_message.id
             )
 
     # (Context menu moved outside class due to context menu decorator constraints)
@@ -156,31 +128,11 @@ class Transcriber(commands.Cog):
             transcribe_start = time.perf_counter()
             text, language, audio_duration, language_prob = await transcribe_msg(msg, self.model)
             processing_time = time.perf_counter() - transcribe_start
-            sent_any = False
-            if language == 'zh' and zhconv and text.strip() and text.strip() != '(empty transcription)':
-                try:
-                    simp_full = zhconv.convert(text, 'zh-hans')
-                    trad_full = zhconv.convert(text, 'zh-hant')
-                    if simp_full != trad_full:
-                        simp_content, simp_file = build_transcription_message(simp_full, msg, language, language_prob, audio_duration, processing_time, variant_label="Simplified 简体")
-                        trad_content, trad_file = build_transcription_message(trad_full, msg, language, language_prob, audio_duration, processing_time, variant_label="Traditional 繁體")
-                        if simp_file:
-                            await msg.reply(content=simp_content, file=simp_file)
-                        else:
-                            await msg.reply(content=simp_content)
-                        if trad_file:
-                            await msg.reply(content=trad_content, file=trad_file)
-                        else:
-                            await msg.reply(content=trad_content)
-                        sent_any = True
-                except Exception:
-                    logger.exception("Chinese variant split failed message_id=%s", msg.id)
-            if not sent_any:
-                content, file = build_transcription_message(text, msg, language, language_prob, audio_duration, processing_time)
-                if file:
-                    await msg.reply(content=content, file=file)
-                else:
-                    await msg.reply(content=content)
+            content, file = build_transcription_message(text, msg, language, language_prob, audio_duration, processing_time)
+            if file:
+                await msg.reply(content=content, file=file)
+            else:
+                await msg.reply(content=content)
             logger.info(
                 "[auto] message_id=%s author=%s chars=%d attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
                 msg.id,
@@ -201,7 +153,7 @@ class Transcriber(commands.Cog):
                 pass
 
 
-def build_transcription_message(transcribed_text: str, message: discord.Message, language: str, language_prob: float, audio_duration: float, processing_time: float, ctx_author: typing.Optional[discord.User] = None, variant_label: typing.Optional[str] = None) -> tuple[str, typing.Optional[discord.File]]:
+def build_transcription_message(transcribed_text: str, message: discord.Message, language: str, language_prob: float, audio_duration: float, processing_time: float, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
     """Return (quoted_message_content, optional_file) including original message metadata.
 
     - Uses block quote formatting.
@@ -243,9 +195,6 @@ def build_transcription_message(transcribed_text: str, message: discord.Message,
     header = " | ".join(header_bits)
 
     quoted = quote_block(preview)
-    if variant_label:
-        # Prepend a small variant marker line
-        quoted = f"> [{variant_label}]\n" + quoted
     footer = "> (truncated, full transcript attached as file)" if (truncated or len(full_text) > FILE_THRESHOLD) else ""
     content = f"> **{header}**\n{quoted}\n{footer}"
 
@@ -256,15 +205,8 @@ def build_transcription_message(transcribed_text: str, message: discord.Message,
         raw_author = author.name if isinstance(author.name, str) else str(author.id)
         author_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_author)[:32] or str(author.id)
         ts_for_name = created.strftime("%Y%m%d-%H%M%S") if created else "unknown"
-        variant_suffix = ''
-        if variant_label:
-            slug_label = 'simp' if '简' in variant_label or 'Simplified' in variant_label else ('trad' if '繁' in variant_label or 'Traditional' in variant_label else variant_label.lower())
-            slug_label = re.sub(r"[^a-z0-9_-]", "", slug_label.lower())[:8]
-            if slug_label:
-                variant_suffix = f"_{slug_label}"
-        filename = f"vm_{author_slug}_{ts_for_name}_{message.id}{variant_suffix}.txt"
-        file_content = full_text
-        file_bytes = io.BytesIO(file_content.encode("utf-8"))
+        filename = f"vm_{author_slug}_{ts_for_name}_{message.id}.txt"
+        file_bytes = io.BytesIO(full_text.encode("utf-8"))
         file = discord.File(file_bytes, filename=filename)
     return content, file
 
@@ -350,54 +292,29 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
         transcribe_start = time.perf_counter()
         text, language, audio_duration, language_prob = await transcribe_msg(message, cog.model)
         processing_time = time.perf_counter() - transcribe_start
-        sent_any = False
-        if language == 'zh' and text.strip() and text.strip() != '(empty transcription)':
-            try:
-                simp_full = zhconv.convert(text, 'zh-hans')
-                trad_full = zhconv.convert(text, 'zh-hant')
-                if simp_full != trad_full:
-                    simp_content, simp_file = build_transcription_message(simp_full, message, language, language_prob, audio_duration, processing_time, interaction.user, variant_label="Simplified 简体")
-                    trad_content, trad_file = build_transcription_message(trad_full, message, language, language_prob, audio_duration, processing_time, interaction.user, variant_label="Traditional 繁體")
-                    if simp_file:
-                        await message.reply(content=simp_content, mention_author=False, file=simp_file)
-                    else:
-                        await message.reply(content=simp_content, mention_author=False)
-                    if trad_file:
-                        await message.reply(content=trad_content, mention_author=False, file=trad_file)
-                    else:
-                        await message.reply(content=trad_content, mention_author=False)
-                    sent_any = True
-            except Exception:
-                logger.exception("Chinese variant split failed message_id=%s", message.id)
+        content, file = build_transcription_message(text, message, language, language_prob, audio_duration, processing_time, interaction.user)
         try:
-            file: typing.Optional[discord.File] = None
-            if not sent_any:
-                content, file = build_transcription_message(text, message, language, language_prob, audio_duration, processing_time, interaction.user)
-                if file:
-                    await message.reply(content=content, mention_author=False, file=file)
-                else:
-                    await message.reply(content=content, mention_author=False)
+            if file:
+                await message.reply(content=content, mention_author=False, file=file)
+            else:
+                await message.reply(content=content, mention_author=False)
             await interaction.followup.send("Transcription posted under the original voice message.")
             logger.info(
-                "[context] completed message_id=%s chars=%d variants=%s attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
+                "[context] completed message_id=%s chars=%d attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
                 message.id,
                 len(text),
-                'dual' if sent_any else 'single',
-                False if sent_any else bool(file),
+                bool(file),
                 time.perf_counter() - started,
                 language,
                 audio_duration,
             )
         except discord.Forbidden:
-            if not sent_any:
-                if file:
-                    await interaction.followup.send(content=content, file=file)
-                else:
-                    await interaction.followup.send(content=content)
+            if file:
+                await interaction.followup.send(content=content, file=file)
             else:
-                await interaction.followup.send("Forbidden replying under original message (variants suppressed)")
+                await interaction.followup.send(content=content)
             logger.warning(
-                "[context] Forbidden replying under message_id=%s variants=%s", message.id, 'dual' if sent_any else 'single'
+                "[context] Forbidden replying under message_id=%s; used followup", message.id
             )
     except Exception:
         logger.exception("Context menu transcription failed message_id=%s", message.id)
