@@ -1,19 +1,16 @@
-# VMT - Discord Voice Message Transcriber and Translator
+# VMT - Discord Voice Message Transcriber
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blueviolet.svg)](https://github.com/dromzeh/vmt)
 [![Formatter: Black](https://img.shields.io/badge/formatter-Black-lightgrey.svg)](https://black.readthedocs.io/en/stable/)
 
-A Discord bot that can transcribe and translate Discord Voice Messages.
-
-- Uses the DeepL API for translation and Google's Speech Recognition API for transcription.
+A Discord bot that locally transcribes Discord Voice Messages (voice notes) to text using the tiny `faster-whisper` model (runs on CPU, auto‑detects better hardware if available).
 
 ## Requirements
 
 - Python 3.8+
 - discord.py
-- pydub
-- speech recognition
-- deepl
+- pydub + ffmpeg (for audio format conversion)
+- faster-whisper
 
 Run the following:
 
@@ -24,7 +21,7 @@ pip install -r requirements.txt
 ## Installation
 
 > **Note**
-> Bot requires Intents to be enabled in the developer portal & an API key for the DeepL API.
+> Bot requires the proper Gateway Intents to be enabled in the Discord developer portal (Message Content + Guild Messages for most setups) and `ffmpeg` available (installed automatically in the provided Docker image).
 
 - Clone the repository: `git clone https://github.com/dromzeh/vmt.git`
 - Rename the `config.example.json` file to `config.json` inside `src/config` and fill in the necessary values (See [Configuration](#configuration)) 
@@ -46,60 +43,25 @@ docker-compose -f compose.yaml up
 
 ## Usage
 
-- To use the bot, simply reply to a voice message with the `transcribe` command. The bot will transcribe the voice message and post the transcription as a reply, if you don't reply, the bot will find the most recent voice message in the channel and transcribe it instead.
-- If you want to automatically translate the text, you can just add the language code as an argument, such as : `vmt transcribe es` for Spanish, full list is available at `vmt languages` or [here](#language-code-list).
-- The bot will then automatically translate the text using the DeepL API.
+- Reply to a voice message with the `transcribe` command (e.g. `vmt transcribe`).
+- If you don't reply to a specific message, the bot searches recent channel history for the most recent voice note and transcribes that instead.
+- The bot also auto-transcribes any new voice message (adds an ⌛ reaction while processing, then posts an embed with the text).
 
 ### Configuration
 
-The config.json file contains the following fields:
+The `config.json` file contains the following fields:
 
-- `discord_token`: Your Discord bot token.
-- `deepl_api_key`: Your DeepL API key.
-- `language_codes`: A dictionary of language codes and their corresponding language names.
+- `token`: Your Discord bot token.
+- `prefix`: Command prefix (default example uses `vmt ` including a space).
 
-### Language Code List
+Example:
 
-<details>
-<summary>Click to expand</summary>
-
-```js
-    "language_codes": {
-        "BG": "Bulgarian",
-        "CS": "Czech",
-        "DA": "Danish",
-        "DE": "German",
-        "EL": "Greek",
-        "EN-GB": "English (British)",
-        "EN-US": "English (American)",
-        "ES": "Spanish",
-        "ET": "Estonian",
-        "FI": "Finnish",
-        "FR": "French",
-        "HU": "Hungarian",
-        "ID": "Indonesian",
-        "IT": "Italian",
-        "JA": "Japanese",
-        "KO": "Korean",
-        "LT": "Lithuanian",
-        "LV": "Latvian",
-        "NB": "Norwegian (Bokmål)",
-        "NL": "Dutch",
-        "PL": "Polish",
-        "PT-BR": "Portuguese (Brazilian)",
-        "PT-PT": "Portuguese",
-        "RO": "Romanian",
-        "RU": "Russian",
-        "SK": "Slovak",
-        "SL": "Slovenian",
-        "SV": "Swedish",
-        "TR": "Turkish",
-        "UK": "Ukrainian",
-        "ZH": "Chinese (simplified)"
-    }
+```json
+{
+    "token": "YOUR_DISCORD_BOT_TOKEN",
+    "prefix": "vmt "
+}
 ```
-
-</details>
 
 ## License
 

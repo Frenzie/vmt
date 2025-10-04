@@ -1,7 +1,6 @@
 """Transcription cog using faster-whisper (tiny model) for local speech-to-text.
 
-Removes dependency on Google SpeechRecognition + DeepL translation.
-Translation arguments are ignored (legacy aliases retained for compatibility).
+Translation feature removed; command now only performs transcription.
 """
 
 import io
@@ -30,14 +29,11 @@ class Transcriber(commands.Cog):
             with open("config/config.json") as conf_file:
                 return json.load(conf_file)
         except FileNotFoundError:
-            return {"prefix": "vmt ", "language_codes": {}}
+            return {"prefix": "vmt "}
 
-    @commands.command(aliases=["t", "translate", "tr", "trans"])  # legacy aliases retained
-    async def transcribe(self, ctx: commands.Context, *, _ignored: typing.Optional[str] = None):
-        """Transcribe a replied-to Discord voice message (or most recent one).
-
-        Any extra argument is ignored (legacy translation parameter).
-        """
+    @commands.command(aliases=["t"])  # minimal alias retained
+    async def transcribe(self, ctx: commands.Context):
+        """Transcribe a replied-to Discord voice message (or the most recent one)."""
         replied_message = None
         if ctx.message.reference:
             replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)

@@ -14,7 +14,7 @@ Discord bot that locally transcribes Discord Voice Messages (VMs) to text using 
 - `src/main.py`: Bootstraps bot, loads config, dynamic cog loader (all `cogs/*.py`). Removes default help.
 - `src/cogs/transcribe.py`: Primary logic (message scanning, validation, transcription via faster-whisper, embed formatting).
 - `src/cogs/help.py`: Custom help command using config prefix & embed styling.
-- `src/cogs/other.py`: (Legacy) language code listing command (translation currently removed but kept for backward compatibility / potential reintroduction).
+<!-- Legacy language code cog removed -->
 - `src/config/example.config.json`: Schema & example for required runtime config.
 - `Dockerfile` + `compose.yaml`: Containerized runtime; mounts `src/config` read‑only so secrets not baked into image.
 
@@ -22,15 +22,11 @@ Discord bot that locally transcribes Discord Voice Messages (VMs) to text using 
 Expect a `src/config/config.json` (NOT committed) shaped like example. Fields actually read:
 - `token`
 - `prefix` (command prefix e.g. `vmt ` including trailing space if desired)
-- `language_codes` (legacy; still parsed but not used for translation now)
-- (Any `deepl_api_key` present is ignored by current code.)
 
 ## Commands & Behaviors
 - `help` (`h`): Custom embed.
-- `language_codes` aliases: `langcodes`, `lc`, `languages`.
-- `transcribe` aliases: `t`, `translate`, `tr`, `trans` (aliases retained for backward compatibility; extra arg ignored).
+- `transcribe` aliases: `t`.
   - If no reply context, searches channel history newest→oldest (limit 50) for first voice message not authored by bot.
-  - Translation removed; any argument is discarded.
 - Passive listener: Any incoming voice message triggers auto transcription (adds ⌛ reaction, later removed).
 
 ## Voice Message Detection
@@ -73,7 +69,6 @@ Provide `src/config/config.json` on host; compose mounts `./src/config` read-onl
 ## Conventions / Things to Preserve
 - Simple procedural style; no custom logging layer.
 - Each cog re-reads config via `load_config()` (no centralized cache). If optimizing, ensure hot-reload semantics preserved.
-- All language codes expected uppercase; normalization happens in command handler.
 - Avoid adding blocking operations inside event handlers; use async patterns if adding network calls.
 
 ## Safe Extension Examples
@@ -91,7 +86,7 @@ Place inside a new cog file; rely on existing loader.
 - Centralize config cache (current repeated disk reads per cog).
 - Structured logging (e.g., `logging` with levels) instead of raw prints.
 - Graceful model load fallback / lazy-load on first use to reduce startup time.
-- Remove legacy translation artifacts (cog `other.py`, config keys) if translation won't return.
+- (Legacy translation artifacts removed.)
 
 ## When Unsure
 Mirror existing patterns & simplicity; avoid adding blocking synchronous operations in the event loop. Ask before reintroducing translation or removing legacy code.
