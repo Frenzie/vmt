@@ -16,20 +16,37 @@ import logging
 import discord
 from discord.ext import commands
 from faster_whisper import WhisperModel
+from dataclasses import dataclass
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TranscriptionJob:
+    source: str  # 'slash' | 'context' | 'auto'
+    voice_message: discord.Message
+    requester: typing.Optional[discord.User]
+    interaction: typing.Optional[discord.Interaction]
+    remove_reaction: bool
 
 
 class Transcriber(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = self.load_config()
-        # Initialize model once; compute_type auto selects best (fp16 on GPU else int8).
         model_name = os.environ.get("WHISPER_MODEL", "small")
         t0 = time.perf_counter()
         self.model = WhisperModel(model_name, compute_type="auto")
         logger.info("Loaded Whisper model '%s' in %.2fs", model_name, time.perf_counter() - t0)
+        # Queue for ordered transcription
+        self._queue: asyncio.Queue[TranscriptionJob] = asyncio.Queue()
+        self._processing_ids: set[int] = set()
+        self._worker_task = self.bot.loop.create_task(self._queue_worker())
+
+    def cog_unload(self):
+        if self._worker_task:
+            self._worker_task.cancel()
 
     def load_config(self):
         try:
@@ -72,10 +89,7 @@ class Transcriber(commands.Cog):
             )
             await interaction.response.send_message(guidance)
             return
-
-        author = replied_message.author
         await interaction.response.defer(thinking=True)
-        started = time.perf_counter()
         logger.info(
             "[slash] guild=%s channel=%s user=%s target_msg=%s starting transcription",
             getattr(interaction.guild, 'id', None),
@@ -83,38 +97,15 @@ class Transcriber(commands.Cog):
             interaction.user.id,
             replied_message.id,
         )
-        try:
-            transcribe_start = time.perf_counter()
-            transcribed_text, language, audio_duration, language_prob = await transcribe_msg(replied_message, self.model)
-            processing_time = time.perf_counter() - transcribe_start
-        except Exception:
-            logger.exception("Transcription failed (slash) message_id=%s", replied_message.id)
-            await interaction.followup.send(f"Failed to transcribe VM from {author}.", ephemeral=True)
-            return
-        content, file = build_transcription_message(transcribed_text, replied_message, language, language_prob, audio_duration, processing_time, interaction.user)
-        try:
-            if file:
-                await replied_message.reply(content=content, mention_author=False, file=file)
-            else:
-                await replied_message.reply(content=content, mention_author=False)
-            await interaction.followup.send("Transcription posted.")
-            logger.info(
-                "[slash] completed message_id=%s chars=%d attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
-                replied_message.id,
-                len(transcribed_text),
-                bool(file),
-                time.perf_counter() - started,
-                language,
-                audio_duration,
-            )
-        except discord.Forbidden:
-            if file:
-                await interaction.followup.send(content=content, file=file)
-            else:
-                await interaction.followup.send(content=content)
-            logger.warning(
-                "[slash] fallback (Forbidden) posted via interaction followup message_id=%s", replied_message.id
-            )
+        position = self._queue.qsize() + 1
+        await interaction.followup.send(f"Queued (position {position}). Processing sequentially...")
+        await self._enqueue_job(TranscriptionJob(
+            source="slash",
+            voice_message=replied_message,
+            requester=interaction.user,
+            interaction=interaction,
+            remove_reaction=False,
+        ))
 
     # (Context menu moved outside class due to context menu decorator constraints)
 
@@ -123,34 +114,111 @@ class Transcriber(commands.Cog):
         logger.debug("on_message id=%s author=%s", msg.id, msg.author.id)
         if not msg_has_voice_note(msg):
             return
-        await msg.add_reaction("\N{HOURGLASS}")
         try:
-            transcribe_start = time.perf_counter()
+            await msg.add_reaction("\N{HOURGLASS}")
+        except Exception:
+            pass
+        await self._enqueue_job(TranscriptionJob(
+            source="auto",
+            voice_message=msg,
+            requester=None,
+            interaction=None,
+            remove_reaction=True,
+        ))
+        logger.info("[auto] queued message_id=%s depth=%d", msg.id, self._queue.qsize())
+
+    async def _enqueue_job(self, job: TranscriptionJob):
+        if job.voice_message.id in self._processing_ids:
+            return
+        await self._queue.put(job)
+        logger.info(
+            "[queue] enqueued source=%s message_id=%s depth=%d",
+            job.source,
+            job.voice_message.id,
+            self._queue.qsize(),
+        )
+
+    async def _do_transcription_job(self, job: TranscriptionJob):
+        msg = job.voice_message
+        t_start = time.perf_counter()
+        try:
             text, language, audio_duration, language_prob = await transcribe_msg(msg, self.model)
-            processing_time = time.perf_counter() - transcribe_start
-            content, file = build_transcription_message(text, msg, language, language_prob, audio_duration, processing_time)
-            if file:
-                await msg.reply(content=content, file=file)
-            else:
-                await msg.reply(content=content)
+            processing_time = time.perf_counter() - t_start
+            content, file = build_transcription_message(
+                text, msg, language, language_prob, audio_duration, processing_time, job.requester
+            )
+            sent = False
+            try:
+                if job.source in ("slash", "context") and job.interaction:
+                    if file:
+                        await msg.reply(content=content, mention_author=False, file=file)
+                    else:
+                        await msg.reply(content=content, mention_author=False)
+                    await job.interaction.followup.send("Transcription posted.")
+                else:
+                    if file:
+                        await msg.reply(content=content, file=file)
+                    else:
+                        await msg.reply(content=content)
+                sent = True
+            except discord.Forbidden:
+                if job.interaction:
+                    if file:
+                        await job.interaction.followup.send(content=content, file=file)
+                    else:
+                        await job.interaction.followup.send(content=content)
+                    sent = True
+                else:
+                    logger.warning("[queue] Forbidden posting message_id=%s", msg.id)
             logger.info(
-                "[auto] message_id=%s author=%s chars=%d attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
+                "[queue] done source=%s message_id=%s chars=%d attach=%s lang=%s audiodur=%.2fs proc=%.2fs sent=%s",
+                job.source,
                 msg.id,
-                msg.author.id,
                 len(text),
                 bool(file),
-                processing_time,
                 language,
                 audio_duration,
+                processing_time,
+                sent,
             )
         except Exception:
-            logger.exception("Auto transcription failed message_id=%s", msg.id)
-            await msg.reply(content=f"Could not transcribe the Voice Message from {msg.author}.")
-        finally:
+            logger.exception("[queue] failure message_id=%s source=%s", msg.id, job.source)
+            if job.interaction:
+                try:
+                    await job.interaction.followup.send("Failed to transcribe.", ephemeral=True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    await msg.reply("Failed to transcribe.")
+                except Exception:
+                    pass
+
+    async def _queue_worker(self):
+        logger.info("[queue] worker started")
+        while True:
+            job: TranscriptionJob = await self._queue.get()
+            msg_id = job.voice_message.id
+            if msg_id in self._processing_ids:
+                self._queue.task_done()
+                continue
+            self._processing_ids.add(msg_id)
+            logger.info(
+                "[queue] start source=%s message_id=%s depth=%d",
+                job.source,
+                msg_id,
+                self._queue.qsize(),
+            )
             try:
-                await msg.remove_reaction("\N{HOURGLASS}", self.bot.user)
-            except Exception:
-                pass
+                await self._do_transcription_job(job)
+            finally:
+                if job.remove_reaction:
+                    try:
+                        await job.voice_message.remove_reaction("\N{HOURGLASS}", self.bot.user)
+                    except Exception:
+                        pass
+                self._processing_ids.discard(msg_id)
+                self._queue.task_done()
 
 
 def build_transcription_message(transcribed_text: str, message: discord.Message, language: str, language_prob: float, audio_duration: float, processing_time: float, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
@@ -287,38 +355,24 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
         await interaction.response.defer(thinking=True)
     except discord.InteractionResponded:
         pass
+    # Queue job
     try:
-        started = time.perf_counter()
-        transcribe_start = time.perf_counter()
-        text, language, audio_duration, language_prob = await transcribe_msg(message, cog.model)
-        processing_time = time.perf_counter() - transcribe_start
-        content, file = build_transcription_message(text, message, language, language_prob, audio_duration, processing_time, interaction.user)
-        try:
-            if file:
-                await message.reply(content=content, mention_author=False, file=file)
-            else:
-                await message.reply(content=content, mention_author=False)
-            await interaction.followup.send("Transcription posted under the original voice message.")
-            logger.info(
-                "[context] completed message_id=%s chars=%d attach=%s elapsed=%.2fs lang=%s audiodur=%.2fs",
-                message.id,
-                len(text),
-                bool(file),
-                time.perf_counter() - started,
-                language,
-                audio_duration,
-            )
-        except discord.Forbidden:
-            if file:
-                await interaction.followup.send(content=content, file=file)
-            else:
-                await interaction.followup.send(content=content)
-            logger.warning(
-                "[context] Forbidden replying under message_id=%s; used followup", message.id
-            )
+        position = cog._queue.qsize() + 1
+        await interaction.followup.send(f"Queued (position {position}). Processing sequentially...")
+        await cog._enqueue_job(TranscriptionJob(
+            source="context",
+            voice_message=message,
+            requester=interaction.user,
+            interaction=interaction,
+            remove_reaction=False,
+        ))
     except Exception:
-        logger.exception("Context menu transcription failed message_id=%s", message.id)
-        await interaction.followup.send("Failed to transcribe that voice message.", ephemeral=True)
+        logger.exception("Context enqueue failed message_id=%s", message.id)
+        await interaction.followup.send("Failed to queue that voice message.", ephemeral=True)
+
+    return
+
+
 
 
 MESSAGE_LINK_RE = re.compile(r"https://(?:ptb\.|canary\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)")
