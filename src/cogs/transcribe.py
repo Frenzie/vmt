@@ -156,6 +156,7 @@ class Transcriber(commands.Cog):
             transcribe_start = time.perf_counter()
             text, language, audio_duration, language_prob = await transcribe_msg(msg, self.model)
             processing_time = time.perf_counter() - transcribe_start
+            file: typing.Optional[discord.File] = None
             sent_any = False
             if language == 'zh' and zhconv and text.strip() and text.strip() != '(empty transcription)':
                 try:
