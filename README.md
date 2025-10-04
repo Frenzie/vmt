@@ -33,13 +33,7 @@ Once the configuration file has been filled, you may run the bot using one of th
 - Install the requirements `pip install -r requirements.txt`
 - Run the bot inside the `/src` folder: `python main.py`
 
-### Docker Installation (Easier)
-
-Assuming `docker` and `docker-compose` are installed
-
-```bash
-docker-compose -f compose.yaml up
-```
+Add the bot as a user following the instructions in <https://discordpy.readthedocs.io/en/stable/discord.html>.
 
 ## Usage
 

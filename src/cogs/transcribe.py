@@ -74,8 +74,7 @@ class Transcriber(commands.Cog):
             print(e)
             await interaction.followup.send(f"Failed to transcribe VM from {author}.", ephemeral=True)
             return
-
-        content, file = build_transcription_message(transcribed_text, author, interaction.user)
+        content, file = build_transcription_message(transcribed_text, replied_message, interaction.user)
         try:
             if file:
                 await replied_message.reply(content=content, mention_author=False, file=file)
@@ -92,13 +91,13 @@ class Transcriber(commands.Cog):
 
     @commands.Cog.listener("on_message")
     async def auto_transcribe(self, msg: discord.Message):
-        print("Received message:", msg.id, "from", msg.author)
+        print("Received message:", msg)
         if not msg_has_voice_note(msg):
             return
         await msg.add_reaction("\N{HOURGLASS}")
         try:
             text = await transcribe_msg(msg, self.model)
-            content, file = build_transcription_message(text, msg.author)
+            content, file = build_transcription_message(text, msg)
             if file:
                 await msg.reply(content=content, file=file)
             else:
@@ -113,12 +112,14 @@ class Transcriber(commands.Cog):
                 pass
 
 
-def build_transcription_message(transcribed_text: str, author: discord.User, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
-    """Return (quoted_message_content, optional_file).
+def build_transcription_message(transcribed_text: str, message: discord.Message, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
+    """Return (quoted_message_content, optional_file) including original message metadata.
 
-    Uses Discord block quote style (>) with a truncated preview if large, and
-    attaches full text as a file when length exceeds threshold.
+    - Uses block quote formatting.
+    - Adds original message ID and UTC timestamp.
+    - File name contains author slug, timestamp, and message ID when attached.
     """
+    author = message.author
     full_text = (transcribed_text or "(empty transcription)").strip()
     PREVIEW_LIMIT = 600
     FILE_THRESHOLD = 900
@@ -126,7 +127,6 @@ def build_transcription_message(transcribed_text: str, author: discord.User, ctx
     truncated = len(full_text) > PREVIEW_LIMIT
     preview = full_text[:PREVIEW_LIMIT]
     if truncated:
-        # refine cut at last newline within final 120 chars if present
         slice_tail = preview[-120:]
         if "\n" in slice_tail:
             cut = preview.rfind("\n")
@@ -134,30 +134,35 @@ def build_transcription_message(transcribed_text: str, author: discord.User, ctx
                 preview = preview[:cut]
         preview += "\n... (truncated)"
 
-    # Quote each line with '>'
     def quote_block(txt: str) -> str:
         return "\n".join(f"> {line}" if line.strip() else ">" for line in txt.splitlines())
 
-    header_bits = [f"Transcription of {author.name}'s voice message"]
+    created = message.created_at  # UTC aware datetime
+    timestamp_str = created.strftime("%Y-%m-%d %H:%M:%S UTC") if created else "unknown time"
+    header_bits = [
+        f"Transcription of {author.name}'s voice message",
+        f"msg {message.id}",
+        timestamp_str,
+    ]
     if ctx_author:
         header_bits.append(f"requested by {ctx_author}")
     header = " | ".join(header_bits)
 
     quoted = quote_block(preview)
+    meta_line = f"> Source: {message.jump_url}" if hasattr(message, 'jump_url') else f"> ID: {message.id}"
     footer = "> (full transcript attached as file)" if (truncated or len(full_text) > FILE_THRESHOLD) else "> (end)"
-    content = f"> **{header}**\n{quoted}\n{footer}"
+    content = f"> **{header}**\n{meta_line}\n{quoted}\n{footer}"
 
+    # File attachment logic
     file: typing.Optional[discord.File] = None
     if truncated or len(full_text) > FILE_THRESHOLD:
+        # Sanitize author and compose filename
+        raw_author = author.name if isinstance(author.name, str) else str(author.id)
+        author_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_author)[:32] or str(author.id)
+        ts_for_name = created.strftime("%Y%m%d-%H%M%S") if created else "unknown"
+        filename = f"vm_{author_slug}_{ts_for_name}_{message.id}.txt"
         file_bytes = io.BytesIO(full_text.encode("utf-8"))
-        file = discord.File(file_bytes, filename="transcription.txt")
-    # Ensure we respect 2000 char limit; if exceeded, fallback to minimal notice + file
-    if len(content) > 1900:
-        notice = f"> **{header}**\n> (preview too long, see attached file)"
-        content = notice
-        if file is None:  # guarantee file for this case
-            file_bytes = io.BytesIO(full_text.encode("utf-8"))
-            file = discord.File(file_bytes, filename="transcription.txt")
+        file = discord.File(file_bytes, filename=filename)
     return content, file
 
 
@@ -217,7 +222,7 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
         pass
     try:
         text = await transcribe_msg(message, cog.model)
-        content, file = build_transcription_message(text, message.author, interaction.user)
+        content, file = build_transcription_message(text, message, interaction.user)
         try:
             if file:
                 await message.reply(content=content, mention_author=False, file=file)
