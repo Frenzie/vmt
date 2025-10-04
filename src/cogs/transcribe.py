@@ -167,16 +167,15 @@ def build_transcription_message(transcribed_text: str, message: discord.Message,
             cut = preview.rfind("\n")
             if cut > 0 and cut > PREVIEW_LIMIT - 200:
                 preview = preview[:cut]
-        preview += "\n... (truncated)"
 
     def quote_block(txt: str) -> str:
         return "\n".join(f"> {line}" if line.strip() else ">" for line in txt.splitlines())
 
     created = message.created_at  # UTC aware datetime
-    timestamp_str = created.strftime("%Y-%m-%d %H:%M:%S UTC") if created else "unknown time"
+    timestamp_str = created.strftime("%Y-%m-%d %H:%M UTC") if created else "unknown time"
     header_bits = [
-        f"Transcription of {author.name}'s voice message",
-        f"msg {message.id}",
+        f"{author.name} transcription",
+        f"{message.jump_url}" if hasattr(message, 'jump_url') else f"{message.id}",
         timestamp_str,
     ]
     if ctx_author:
@@ -184,9 +183,8 @@ def build_transcription_message(transcribed_text: str, message: discord.Message,
     header = " | ".join(header_bits)
 
     quoted = quote_block(preview)
-    meta_line = f"> Source: {message.jump_url}" if hasattr(message, 'jump_url') else f"> ID: {message.id}"
-    footer = "> (full transcript attached as file)" if (truncated or len(full_text) > FILE_THRESHOLD) else "> (end)"
-    content = f"> **{header}**\n{meta_line}\n{quoted}\n{footer}"
+    footer = "> (truncated, full transcript attached as file)" if (truncated or len(full_text) > FILE_THRESHOLD) else ""
+    content = f"> **{header}**\n{quoted}\n{footer}"
 
     # File attachment logic
     file: typing.Optional[discord.File] = None
