@@ -3,40 +3,38 @@
 These instructions guide AI coding agents contributing to this repository.
 
 ## Purpose & Overview
-Discord bot that transcribes Discord Voice Messages (VMs) to text and optionally translates them via DeepL. Core flow:
-1. User triggers `vmt transcribe [LANG?]` or replies to a VM.
+Discord bot that locally transcribes Discord Voice Messages (VMs) to text using `faster-whisper` (tiny model). Core flow:
+1. User triggers `vmt transcribe` (optionally replying to a VM) OR sends a new voice message (auto mode).
 2. Bot locates target voice message (replied-to or most recent in channel).
 3. Audio (OGG/MP3/Discord voice note) → WAV via `pydub`/`ffmpeg`.
-4. Speech → text using Google Speech Recognition (`speech_recognition` lib).
-5. (Optional) Text → translation via DeepL API.
-6. Result embedded + posted (with optional translation field).
+4. WAV fed to `WhisperModel('tiny')` (fast, lightweight). Transcription done off-thread via executor.
+5. Result embedded + posted.
 
 ## Key Files
 - `src/main.py`: Bootstraps bot, loads config, dynamic cog loader (all `cogs/*.py`). Removes default help.
-- `src/cogs/transcribe.py`: Primary logic (message scanning, validation, transcription, translation, embed formatting).
+- `src/cogs/transcribe.py`: Primary logic (message scanning, validation, transcription via faster-whisper, embed formatting).
 - `src/cogs/help.py`: Custom help command using config prefix & embed styling.
-- `src/cogs/other.py`: Language code listing command.
+- `src/cogs/other.py`: (Legacy) language code listing command (translation currently removed but kept for backward compatibility / potential reintroduction).
 - `src/config/example.config.json`: Schema & example for required runtime config.
 - `Dockerfile` + `compose.yaml`: Containerized runtime; mounts `src/config` read‑only so secrets not baked into image.
 
 ## Runtime Configuration
 Expect a `src/config/config.json` (NOT committed) shaped like example. Fields actually read:
-- `token` (named `token` in example but read in code as `config["token"]` and assigned to `bot_token`)
+- `token`
 - `prefix` (command prefix e.g. `vmt ` including trailing space if desired)
-- `deepl_api_key`
-- `language_codes` (dict of UPPERCASE language codes ⇒ human names)
+- `language_codes` (legacy; still parsed but not used for translation now)
+- (Any `deepl_api_key` present is ignored by current code.)
 
 ## Commands & Behaviors
 - `help` (`h`): Custom embed.
 - `language_codes` aliases: `langcodes`, `lc`, `languages`.
-- `transcribe` aliases: `t`, `translate`, `tr`, `trans`.
-  - Optional arg = target language code (case-insensitive; normalized upper; must exist in `language_codes`).
-  - If no reply context, searches channel history newest→oldest for first voice message not authored by bot.
-  - Auto-adds translation field when valid target provided.
+- `transcribe` aliases: `t`, `translate`, `tr`, `trans` (aliases retained for backward compatibility; extra arg ignored).
+  - If no reply context, searches channel history newest→oldest (limit 50) for first voice message not authored by bot.
+  - Translation removed; any argument is discarded.
 - Passive listener: Any incoming voice message triggers auto transcription (adds ⌛ reaction, later removed).
 
 ## Voice Message Detection
-`msg_has_voice_note(msg)` currently checks:
+`msg_has_voice_note(msg)` currently checks (unchanged legacy heuristic):
 ```python
 if not msg.attachments or not msg.flags.value >> 13:
     return False
@@ -44,17 +42,18 @@ if not msg.attachments or not msg.flags.value >> 13:
 This relies on bit-shifting of internal flag integer to infer voice message; treat as brittle. Prefer preserving existing helper if modifying.
 
 ## Error Handling Patterns
-- Silent except for printing raw exceptions to stdout (no logging framework).
-- User-facing failures return concise message: "Could not transcribe ...".
-- `sr.UnknownValueError` specifically mapped to "response was empty" messages.
+- Minimal: prints exceptions to stdout (no logging framework).
+- User-facing failures: short failure message ("Failed to transcribe" / "Could not transcribe").
+- Empty transcription returns placeholder `(empty transcription)`.
 
 ## External Dependencies
-- `speech_recognition` + Google Web Speech API (network call; may raise `UnknownValueError`).
-- `pydub` requires `ffmpeg` (installed in Dockerfile). Keep this when altering base image.
-- `deepl` official SDK; `Translator(auth_key=...)` invoked only if translation requested to avoid unnecessary API calls.
+- `faster-whisper` tiny model for on-device transcription (CPU-friendly; auto chooses compute type).
+- `pydub` + `ffmpeg` for format conversion.
+- `discord.py` for bot events/commands.
+- (Legacy) DeepL & SpeechRecognition removed from active code; may purge from dependencies if fully deprecated.
 
 ## Embeds & Attribution
-Embeds use `discord.Color.og_blurple()` consistently. Transcription wrapped in triple backticks. Footer optionally includes requester.
+Embeds use `discord.Color.og_blurple()`; transcription wrapped in triple backticks; footer shows requester when command-invoked.
 
 ## Dynamic Cog Loading
 `setup_hook` in `Bot` iterates `os.listdir("cogs")` and loads each `*.py` as `cogs.<name>`. To add features: create new file in `src/cogs/` with `async def setup(bot): await bot.add_cog(NewCog(bot))`.
@@ -88,10 +87,11 @@ async def ping_api(self, ctx):
 Place inside a new cog file; rely on existing loader.
 
 ## Potential Improvement Targets (Only implement if asked)
-- Replace brittle voice note flag check with Discord-provided attribute if exposed.
-- Centralize config load to avoid repeated disk I/O.
-- Structured logging instead of print statements.
-- Add minimal tests for `msg_has_voice_note` & transcription pipeline (mocking external APIs).
+- Replace brittle voice note flag check with official attribute if exposed by discord.py.
+- Centralize config cache (current repeated disk reads per cog).
+- Structured logging (e.g., `logging` with levels) instead of raw prints.
+- Graceful model load fallback / lazy-load on first use to reduce startup time.
+- Remove legacy translation artifacts (cog `other.py`, config keys) if translation won't return.
 
 ## When Unsure
-Echo current behavior rather than inventing new flows; ask for clarification before refactoring architecture (e.g., introducing ORM, caching). Keep dependency versions aligned with `requirements.txt`.
+Mirror existing patterns & simplicity; avoid adding blocking synchronous operations in the event loop. Ask before reintroducing translation or removing legacy code.

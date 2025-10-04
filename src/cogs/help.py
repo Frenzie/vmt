@@ -22,14 +22,8 @@ class Help(commands.Cog):
         )
 
         embed.add_field(
-            name="**Translate / Transcribe**",
-            value=f"\n> Transcribes (& Translates) a voice message into text.\n > Usage: `{self.config['prefix']}transcribe [language_code (optional)]`\n *You can either reply to the voice message running the command or the bot will find the most recent voice message in the channel.*",
-            inline=False,
-        )
-
-        embed.add_field(
-            name="**Language Codes**",
-            value=f"> List of available language codes.\n > Usage: `{self.config['prefix']}languages`\n*Current Supported Languages: {len(self.config['language_codes'])}*",
+            name="**Transcribe**",
+            value=f"\n> Transcribes a Discord voice message into text locally (Whisper tiny).\n > Usage: `{self.config['prefix']}transcribe` (reply to a voice message or it will pick the most recent).",
             inline=False,
         )
 
