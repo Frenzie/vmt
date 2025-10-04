@@ -9,7 +9,6 @@ import json
 import typing
 import asyncio
 import tempfile
-import textwrap
 import re
 
 import discord
@@ -76,12 +75,18 @@ class Transcriber(commands.Cog):
             await interaction.followup.send(f"Failed to transcribe VM from {author}.", ephemeral=True)
             return
 
-        embed = make_embed(transcribed_text, author, interaction.user)
+        content, file = build_transcription_message(transcribed_text, author, interaction.user)
         try:
-            await replied_message.reply(embed=embed, mention_author=False)
+            if file:
+                await replied_message.reply(content=content, mention_author=False, file=file)
+            else:
+                await replied_message.reply(content=content, mention_author=False)
             await interaction.followup.send("Transcription posted.")
         except discord.Forbidden:
-            await interaction.followup.send(embed=embed)
+            if file:
+                await interaction.followup.send(content=content, file=file)
+            else:
+                await interaction.followup.send(content=content)
 
     # (Context menu moved outside class due to context menu decorator constraints)
 
@@ -93,8 +98,11 @@ class Transcriber(commands.Cog):
         await msg.add_reaction("\N{HOURGLASS}")
         try:
             text = await transcribe_msg(msg, self.model)
-            embed = make_embed(text, msg.author)
-            await msg.reply(embed=embed)
+            content, file = build_transcription_message(text, msg.author)
+            if file:
+                await msg.reply(content=content, file=file)
+            else:
+                await msg.reply(content=content)
         except Exception as e:
             print(e)
             await msg.reply(content=f"Could not transcribe the Voice Message from {msg.author}.")
@@ -105,23 +113,52 @@ class Transcriber(commands.Cog):
                 pass
 
 
-def make_embed(transcribed_text: str, author: discord.User, ctx_author: typing.Optional[discord.User] = None):
-    embed = discord.Embed(color=discord.Color.og_blurple(), title=f"🔊 {author.name}'s Voice Message")
-    embed.add_field(
-        name="Transcription",
-        value=textwrap.dedent(
-            f"""
-            ```
-            {transcribed_text}
-            ```
-            [vmt bot](https://github.com/frenzie/vmt)
-            """
-        ),
-        inline=False,
-    )
+def build_transcription_message(transcribed_text: str, author: discord.User, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
+    """Return (quoted_message_content, optional_file).
+
+    Uses Discord block quote style (>) with a truncated preview if large, and
+    attaches full text as a file when length exceeds threshold.
+    """
+    full_text = (transcribed_text or "(empty transcription)").strip()
+    PREVIEW_LIMIT = 600
+    FILE_THRESHOLD = 900
+
+    truncated = len(full_text) > PREVIEW_LIMIT
+    preview = full_text[:PREVIEW_LIMIT]
+    if truncated:
+        # refine cut at last newline within final 120 chars if present
+        slice_tail = preview[-120:]
+        if "\n" in slice_tail:
+            cut = preview.rfind("\n")
+            if cut > 0 and cut > PREVIEW_LIMIT - 200:
+                preview = preview[:cut]
+        preview += "\n... (truncated)"
+
+    # Quote each line with '>'
+    def quote_block(txt: str) -> str:
+        return "\n".join(f"> {line}" if line.strip() else ">" for line in txt.splitlines())
+
+    header_bits = [f"Transcription of {author.name}'s voice message"]
     if ctx_author:
-        embed.set_footer(text=f"Requested by {ctx_author}")
-    return embed
+        header_bits.append(f"requested by {ctx_author}")
+    header = " | ".join(header_bits)
+
+    quoted = quote_block(preview)
+    footer = "> (full transcript attached as file)" if (truncated or len(full_text) > FILE_THRESHOLD) else "> (end)"
+    content = f"> **{header}**\n{quoted}\n{footer}"
+
+    file: typing.Optional[discord.File] = None
+    if truncated or len(full_text) > FILE_THRESHOLD:
+        file_bytes = io.BytesIO(full_text.encode("utf-8"))
+        file = discord.File(file_bytes, filename="transcription.txt")
+    # Ensure we respect 2000 char limit; if exceeded, fallback to minimal notice + file
+    if len(content) > 1900:
+        notice = f"> **{header}**\n> (preview too long, see attached file)"
+        content = notice
+        if file is None:  # guarantee file for this case
+            file_bytes = io.BytesIO(full_text.encode("utf-8"))
+            file = discord.File(file_bytes, filename="transcription.txt")
+    return content, file
 
 
 def msg_has_voice_note(msg: typing.Optional[discord.Message]) -> bool:
@@ -180,12 +217,18 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
         pass
     try:
         text = await transcribe_msg(message, cog.model)
-        embed = make_embed(text, message.author, interaction.user)
+        content, file = build_transcription_message(text, message.author, interaction.user)
         try:
-            await message.reply(embed=embed, mention_author=False)
+            if file:
+                await message.reply(content=content, mention_author=False, file=file)
+            else:
+                await message.reply(content=content, mention_author=False)
             await interaction.followup.send("Transcription posted under the original voice message.")
         except discord.Forbidden:
-            await interaction.followup.send(embed=embed)
+            if file:
+                await interaction.followup.send(content=content, file=file)
+            else:
+                await interaction.followup.send(content=content)
     except Exception as e:
         print(e)
         await interaction.followup.send("Failed to transcribe that voice message.", ephemeral=True)
