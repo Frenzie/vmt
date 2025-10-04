@@ -89,7 +89,7 @@ def make_embed(transcribed_text: str, author: discord.User, ctx_author: typing.O
             ```
             {transcribed_text}
             ```
-            [vmt bot](https://github.com/dromzeh/vmt)
+            [vmt bot](https://github.com/frenzie/vmt)
             """
         ),
         inline=False,
