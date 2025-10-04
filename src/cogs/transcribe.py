@@ -86,13 +86,13 @@ class Transcriber(commands.Cog):
         )
         try:
             transcribe_start = time.perf_counter()
-            transcribed_text, language, audio_duration = await transcribe_msg(replied_message, self.model)
+            transcribed_text, language, audio_duration, language_prob = await transcribe_msg(replied_message, self.model)
             processing_time = time.perf_counter() - transcribe_start
         except Exception:
             logger.exception("Transcription failed (slash) message_id=%s", replied_message.id)
             await interaction.followup.send(f"Failed to transcribe VM from {author}.", ephemeral=True)
             return
-        content, file = build_transcription_message(transcribed_text, replied_message, language, audio_duration, processing_time, interaction.user)
+        content, file = build_transcription_message(transcribed_text, replied_message, language, language_prob, audio_duration, processing_time, interaction.user)
         try:
             if file:
                 await replied_message.reply(content=content, mention_author=False, file=file)
@@ -127,9 +127,9 @@ class Transcriber(commands.Cog):
         await msg.add_reaction("\N{HOURGLASS}")
         try:
             transcribe_start = time.perf_counter()
-            text, language, audio_duration = await transcribe_msg(msg, self.model)
+            text, language, audio_duration, language_prob = await transcribe_msg(msg, self.model)
             processing_time = time.perf_counter() - transcribe_start
-            content, file = build_transcription_message(text, msg, language, audio_duration, processing_time)
+            content, file = build_transcription_message(text, msg, language, language_prob, audio_duration, processing_time)
             if file:
                 await msg.reply(content=content, file=file)
             else:
@@ -154,7 +154,7 @@ class Transcriber(commands.Cog):
                 pass
 
 
-def build_transcription_message(transcribed_text: str, message: discord.Message, language: str, audio_duration: float, processing_time: float, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
+def build_transcription_message(transcribed_text: str, message: discord.Message, language: str, language_prob: float, audio_duration: float, processing_time: float, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
     """Return (quoted_message_content, optional_file) including original message metadata.
 
     - Uses block quote formatting.
@@ -184,9 +184,10 @@ def build_transcription_message(transcribed_text: str, message: discord.Message,
     dur_str = f"{int(audio_duration // 60)}:{int(audio_duration % 60):02d}"
     # Short language code fallback
     lang_display = language or "?"
+    prob_display = f"{language_prob*100:.0f}%" if language_prob and language_prob > 0 else "?"
     header_bits = [
         f"{author.name}",
-        f"{lang_display} {dur_str} (⏱{processing_time:.2f}s)",
+        f"{lang_display} {prob_display} {dur_str} (⏱{processing_time:.2f}s)",
         timestamp_str,
         f"{message.jump_url}" if hasattr(message, 'jump_url') else f"{message.id}",
     ]
@@ -219,7 +220,7 @@ def msg_has_voice_note(msg: typing.Optional[discord.Message]) -> bool:
     return True
 
 
-async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str, str, float]:
+async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str, str, float, float]:
     # Read attachment bytes
     t0 = time.perf_counter()
     voice_msg_bytes = await msg.attachments[0].read()
@@ -237,8 +238,9 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
             text_out = " ".join(seg.text.strip() for seg in segments).strip()
             language_code = getattr(info, 'language', 'unknown')
             duration_sec = getattr(info, 'duration', 0.0)
-            return text_out, language_code, duration_sec
-        text, language_code, duration_sec = await loop.run_in_executor(None, _run)
+            language_prob = float(getattr(info, 'language_probability', 0.0) or 0.0)
+            return text_out, language_code, duration_sec, language_prob
+        text, language_code, duration_sec, language_prob = await loop.run_in_executor(None, _run)
     finally:
         try:
             os.remove(tmp_path)
@@ -246,15 +248,16 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
             pass
     elapsed = time.perf_counter() - t0
     logger.info(
-        "[core] transcribed message_id=%s duration=%.2fs bytes=%d chars=%d lang=%s audiodur=%.2fs",
+        "[core] transcribed message_id=%s duration=%.2fs bytes=%d chars=%d lang=%s prob=%.2f audiodur=%.2fs",
         msg.id,
         elapsed,
         len(voice_msg_bytes),
         len(text),
         language_code,
+        language_prob,
         duration_sec,
     )
-    return (text or "(empty transcription)", language_code, duration_sec)
+    return (text or "(empty transcription)", language_code, duration_sec, language_prob)
 
 
 async def setup(bot):
@@ -282,9 +285,9 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
     try:
         started = time.perf_counter()
         transcribe_start = time.perf_counter()
-        text, language, audio_duration = await transcribe_msg(message, cog.model)
+        text, language, audio_duration, language_prob = await transcribe_msg(message, cog.model)
         processing_time = time.perf_counter() - transcribe_start
-        content, file = build_transcription_message(text, message, language, audio_duration, processing_time, interaction.user)
+        content, file = build_transcription_message(text, message, language, language_prob, audio_duration, processing_time, interaction.user)
         try:
             if file:
                 await message.reply(content=content, mention_author=False, file=file)
