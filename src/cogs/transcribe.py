@@ -234,7 +234,7 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
         # Run in executor to avoid blocking the event loop
         loop = asyncio.get_event_loop()
         def _run():
-            segments, info = model.transcribe(tmp_path, beam_size=1)
+            segments, info = model.transcribe(tmp_path, beam_size=5)
             text_out = " ".join(seg.text.strip() for seg in segments).strip()
             language_code = getattr(info, 'language', 'unknown')
             duration_sec = getattr(info, 'duration', 0.0)
