@@ -227,7 +227,7 @@ def build_transcription_message(transcribed_text: str, message: discord.Message,
         return "\n".join(f"> {line}" if line.strip() else ">" for line in txt.splitlines())
 
     created = message.created_at  # UTC aware datetime
-    timestamp_str = created.strftime("%Y-%m-%d %H:%M UTC") if created else "unknown time"
+    timestamp_str = f"<t:{int(created.timestamp())}:f>" if created else "unknown time"
     # Format duration mm:ss
     dur_str = f"{int(audio_duration // 60)}:{int(audio_duration % 60):02d}"
     # Short language code fallback
