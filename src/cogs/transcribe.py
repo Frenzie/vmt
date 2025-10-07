@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class TranscriptionJob:
     source: str  # 'slash' | 'context' | 'auto'
     voice_message: discord.Message
-    requester: typing.Optional[discord.User]
+    requester: typing.Optional[typing.Union[discord.User, discord.Member]]
     interaction: typing.Optional[discord.Interaction]
     remove_reaction: bool
 
@@ -62,14 +62,15 @@ class Transcriber(commands.Cog):
         replied_message: typing.Optional[discord.Message] = None
         if target:
             replied_message = await resolve_target_message(interaction, target)
-            if replied_message and not msg_has_voice_note(replied_message):
-                await interaction.response.send_message("Provided message is not a voice message.")
+            if replied_message and not msg_is_transcribable(replied_message):
+                await interaction.response.send_message("Provided message is not a voice message or audio attachment.")
                 return
         # 2. If still none, attempt recent history scan (requires permission)
         if not replied_message:
             channel = interaction.channel
             if hasattr(channel, "history"):
                 can_history = True
+                audio_fallback: typing.Optional[discord.Message] = None
                 if interaction.guild and interaction.guild.me:
                     perms = channel.permissions_for(interaction.guild.me)  # type: ignore
                     if hasattr(perms, 'read_message_history') and not perms.read_message_history:
@@ -77,15 +78,21 @@ class Transcriber(commands.Cog):
                 if can_history:
                     try:
                         async for message in channel.history(limit=50, oldest_first=False):  # type: ignore[attr-defined]
-                            if message.author != interaction.client.user and msg_has_voice_note(message):  # type: ignore
+                            if message.author == interaction.client.user:  # type: ignore
+                                continue
+                            if msg_has_voice_note(message):  # prefer native voice note
                                 replied_message = message
                                 break
+                            if not audio_fallback and msg_has_audio_attachment(message):
+                                audio_fallback = message
                     except discord.Forbidden:
                         pass
+                if not replied_message and audio_fallback:
+                    replied_message = audio_fallback
         # 3. If still none, respond with guidance
         if not replied_message:
             guidance = (
-                "No voice message found. Provide a message link/ID or grant 'Read Message History'."
+                "No voice or audio message found. Provide a message link/ID or grant 'Read Message History'."
             )
             await interaction.response.send_message(guidance)
             return
@@ -112,7 +119,7 @@ class Transcriber(commands.Cog):
     @commands.Cog.listener("on_message")
     async def auto_transcribe(self, msg: discord.Message):
         logger.debug("on_message id=%s author=%s", msg.id, msg.author.id)
-        if not msg_has_voice_note(msg):
+        if not msg_is_transcribable(msg):
             return
         try:
             await msg.add_reaction("\N{HOURGLASS}")
@@ -212,7 +219,7 @@ class Transcriber(commands.Cog):
             try:
                 await self._do_transcription_job(job)
             finally:
-                if job.remove_reaction:
+                if job.remove_reaction and self.bot.user:
                     try:
                         await job.voice_message.remove_reaction("\N{HOURGLASS}", self.bot.user)
                     except Exception:
@@ -221,7 +228,15 @@ class Transcriber(commands.Cog):
                 self._queue.task_done()
 
 
-def build_transcription_message(transcribed_text: str, message: discord.Message, language: str, language_prob: float, audio_duration: float, processing_time: float, ctx_author: typing.Optional[discord.User] = None) -> tuple[str, typing.Optional[discord.File]]:
+def build_transcription_message(
+    transcribed_text: str,
+    message: discord.Message,
+    language: str,
+    language_prob: float,
+    audio_duration: float,
+    processing_time: float,
+    ctx_author: typing.Optional[typing.Union[discord.User, discord.Member]] = None,
+) -> tuple[str, typing.Optional[discord.File]]:
     """Return (quoted_message_content, optional_file) including original message metadata.
 
     - Uses block quote formatting.
@@ -286,6 +301,21 @@ def msg_has_voice_note(msg: typing.Optional[discord.Message]) -> bool:
         return False
     return True
 
+AUDIO_EXTS = {'.mp3', '.wav', '.ogg', '.oga', '.opus', '.m4a', '.flac'}
+
+def msg_has_audio_attachment(msg: typing.Optional[discord.Message]) -> bool:
+    if not msg or not msg.attachments:
+        return False
+    for att in msg.attachments:
+        name = (att.filename or '').lower()
+        ct = (att.content_type or '').lower()
+        if ct.startswith('audio/') or any(name.endswith(ext) for ext in AUDIO_EXTS):
+            return True
+    return False
+
+def msg_is_transcribable(msg: typing.Optional[discord.Message]) -> bool:
+    return msg_has_voice_note(msg) or msg_has_audio_attachment(msg)
+
 
 async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str, str, float, float]:
     """Transcribe attachment."""
@@ -303,10 +333,7 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
         loop = asyncio.get_event_loop()
         def _run():
             segments, info = model.transcribe(tmp_path, beam_size=5)
-            parts = []
-            for seg in segments:
-                if seg.text:
-                    parts.append(seg.text.strip())
+            parts = [s.text.strip() for s in segments if s.text]
             text_out = " ".join(parts).strip()
             language_code = getattr(info, 'language', 'unknown')
             duration_sec = getattr(info, 'duration', 0.0)
@@ -348,8 +375,8 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
     if not cog:
         await interaction.response.send_message("Transcriber unavailable.")
         return
-    if not msg_has_voice_note(message):
-        await interaction.response.send_message("Selected message is not a Discord voice message.")
+    if not msg_is_transcribable(message):
+        await interaction.response.send_message("Selected message is neither a Discord voice note nor an audio file.")
         return
     try:
         await interaction.response.defer(thinking=True)
@@ -371,7 +398,6 @@ async def context_transcribe(interaction: discord.Interaction, message: discord.
         await interaction.followup.send("Failed to queue that voice message.", ephemeral=True)
 
     return
-
 
 
 
