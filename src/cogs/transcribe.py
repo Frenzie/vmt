@@ -339,7 +339,7 @@ def build_transcription_message(
                 preview = preview[:cut]
 
     def quote_block(txt: str) -> str:
-        return "\n".join(f"> {line}" if line.strip() else ">" for line in txt.splitlines())
+        return "\n".join(f"> {line}" if line.strip() else "> " for line in txt.splitlines())
 
     created = message.created_at  # UTC aware datetime
     timestamp_str = f"<t:{int(created.timestamp())}:f>" if created else "unknown time"
