@@ -21,6 +21,87 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+"""Paragraph formatting configuration.
+
+Enabled by default. Disable with WHISPER_PARAGRAPHS=0.
+Optional tuning via env vars:
+    WHISPER_PARAGRAPH_GAP (seconds, default 0.6) – silence gap threshold to start new paragraph
+  WHISPER_PARAGRAPH_MIN_LEN (characters, default 40) – minimum paragraph length to allow punctuation-triggered split
+"""
+PARA_ENABLED = os.getenv("WHISPER_PARAGRAPHS", "1") != "0"
+WORD_TIMINGS_ENABLED = os.getenv("WHISPER_WORD_TIMINGS", "1") != "0"
+try:
+    PARA_GAP = float(os.getenv("WHISPER_PARAGRAPH_GAP", "1.0"))
+except ValueError:
+    PARA_GAP = 1.0
+try:
+    PARA_MIN_LEN = int(os.getenv("WHISPER_PARAGRAPH_MIN_LEN", "40"))
+except ValueError:
+    PARA_MIN_LEN = 40
+
+TERMINAL_PUNCT = ".!?…"  # characters that may indicate sentence end
+
+def _format_paragraphs_words(words: list) -> str:
+    """Paragraph formatting based on individual word timings.
+
+    Uses word-level gaps instead of coarser segment gaps for better boundary detection.
+    Logic:
+      - Start new paragraph if gap between consecutive words > PARA_GAP and current paragraph length >= PARA_MIN_LEN.
+      - Or if gap > PARA_GAP and previous word ends with TERMINAL_PUNCT (always split).
+      - Merge very short paragraphs forward (< PARA_MIN_LEN chars) similar to segment approach.
+    """
+    if not words:
+        return ""
+    paras: list[list[str]] = []
+    cur: list[str] = []
+    cur_len = 0
+    last_end: float | None = None
+    last_word_text = ""
+
+    def commit():
+        nonlocal cur, cur_len
+        if cur:
+            paras.append(cur.copy())
+            cur.clear()
+            cur_len = 0
+
+    for w in words:
+        text = getattr(w, 'word', '')
+        if not text:
+            continue
+        start = getattr(w, 'start', None)
+        end = getattr(w, 'end', None)
+        gap = (start - last_end) if (start is not None and last_end is not None) else 0.0
+        split = False
+        if cur and gap > PARA_GAP:
+            # Always split if punctuation ended previous word OR paragraph already long
+            if last_word_text[-1:] in TERMINAL_PUNCT or cur_len >= PARA_MIN_LEN:
+                split = True
+        if split:
+            commit()
+        cur.append(text)
+        cur_len += len(text)
+        last_word_text = text
+        if end is not None:
+            last_end = end
+    commit()
+
+    # Merge small paragraphs
+    merged: list[str] = []
+    i = 0
+    while i < len(paras):
+        block = paras[i]
+        block_text = "".join(block).strip()
+        if len(block_text) < PARA_MIN_LEN and i + 1 < len(paras):
+            paras[i + 1] = block + paras[i + 1]
+        else:
+            # Normalize spacing: words may include leading spaces already, so compact double spaces
+            merged.append(re.sub(r"\s+", " ", block_text).strip())
+        i += 1
+    if not merged:
+        merged = [re.sub(r"\s+", " ", "".join(sum(paras, []))).strip()]
+    return "\n\n".join(merged).strip()
+
 
 @dataclass
 class TranscriptionJob:
@@ -332,9 +413,25 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
     try:
         loop = asyncio.get_event_loop()
         def _run():
-            segments, info = model.transcribe(tmp_path, beam_size=5)
-            parts = [s.text.strip() for s in segments if s.text]
-            text_out = " ".join(parts).strip()
+            segments_iter, info = model.transcribe(
+                tmp_path,
+                beam_size=5,
+                word_timestamps=PARA_ENABLED and WORD_TIMINGS_ENABLED,
+            )
+            # Materialize generator so we can traverse multiple times
+            seg_list = [s for s in segments_iter if getattr(s, 'text', None)]
+            if PARA_ENABLED:
+                # Prefer word-level grouping if available
+                words: list = []
+                if WORD_TIMINGS_ENABLED:
+                    for seg in seg_list:
+                        seg_words = getattr(seg, 'words', None)
+                        if seg_words:
+                            words.extend(seg_words)
+                if words:
+                    text_out = _format_paragraphs_words(words)
+            else:
+                text_out = " ".join(getattr(s, 'text', '').strip() for s in seg_list if getattr(s, 'text', None)).strip()
             language_code = getattr(info, 'language', 'unknown')
             duration_sec = getattr(info, 'duration', 0.0)
             language_prob = float(getattr(info, 'language_probability', 0.0) or 0.0)
