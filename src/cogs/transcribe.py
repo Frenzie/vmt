@@ -17,6 +17,7 @@ import discord
 from discord.ext import commands
 from faster_whisper import WhisperModel
 from dataclasses import dataclass
+import aiohttp
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,18 @@ except ValueError:
     PARA_MIN_LEN = 40
 
 TERMINAL_PUNCT = ".!?…"  # characters that may indicate sentence end
+
+# Remote ASR offload configuration
+REMOTE_ASR_URL = os.getenv("REMOTE_ASR_URL")  # e.g., https://<space>.hf.space/transcribe
+REMOTE_ASR_TOKEN = os.getenv("REMOTE_ASR_AUTH")  # optional Bearer token
+try:
+    REMOTE_ASR_TIMEOUT_START = float(os.getenv("REMOTE_ASR_TIMEOUT_START", "1.0"))  # seconds to confirm remote is reachable
+except ValueError:
+    REMOTE_ASR_TIMEOUT_START = 1.0
+try:
+    REMOTE_ASR_TIMEOUT_TOTAL = float(os.getenv("REMOTE_ASR_TIMEOUT_TOTAL", "600.0"))  # overall request timeout
+except ValueError:
+    REMOTE_ASR_TIMEOUT_TOTAL = 600.0
 
 def _format_paragraphs_words(words: list) -> str:
     """Paragraph formatting based on individual word timings.
@@ -399,14 +412,76 @@ def msg_is_transcribable(msg: typing.Optional[discord.Message]) -> bool:
 
 
 async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str, str, float, float]:
-    """Transcribe attachment."""
+    """Transcribe attachment, preferring remote offload when configured.
+
+    Offload rule: if remote is configured and responds to a quick reachability check within
+    REMOTE_ASR_TIMEOUT_START seconds, send the request to remote; otherwise fall back to local.
+    """
     t0 = time.perf_counter()
     attachment = msg.attachments[0]
     voice_msg_bytes = await attachment.read()
-    # Pick suffix from original filename (fallback .tmp)
     base, ext = os.path.splitext(attachment.filename or "")
     if not ext or len(ext) > 10:
         ext = ".tmp"
+
+    async def _remote_try() -> tuple[str, str, float, float]:
+        if not REMOTE_ASR_URL:
+            raise RuntimeError("remote not configured")
+        # Try quick reachability check (healthz) with short timeout
+        health_url = REMOTE_ASR_URL
+        if health_url.endswith("/transcribe"):
+            health_url = health_url[: -len("/transcribe")] + "/healthz"
+        headers = {}
+        if REMOTE_ASR_TOKEN:
+            headers["Authorization"] = f"Bearer {REMOTE_ASR_TOKEN}"
+        # Short check
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REMOTE_ASR_TIMEOUT_START)) as s:
+                async with s.get(health_url, headers=headers) as r:
+                    if r.status >= 400:
+                        raise RuntimeError(f"healthz status {r.status}")
+        except Exception as e:
+            raise RuntimeError(f"remote unreachable: {e}")
+
+        # Post audio to remote with longer timeout
+        form = aiohttp.FormData()
+        form.add_field(
+            "audio",
+            voice_msg_bytes,
+            filename=attachment.filename or f"audio{ext}",
+            content_type=attachment.content_type or "application/octet-stream",
+        )
+        timeout = aiohttp.ClientTimeout(total=REMOTE_ASR_TIMEOUT_TOTAL)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(REMOTE_ASR_URL, data=form, headers=headers) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                text = (data.get("text") or "").strip() or "(empty transcription)"
+                language_code = data.get("language") or "unknown"
+                duration_sec = float(data.get("duration") or 0.0)
+                language_prob = float(data.get("language_probability") or 0.0)
+                return text, language_code, duration_sec, language_prob
+
+    # Try remote first (if configured); if any failure, fall back to local
+    if REMOTE_ASR_URL:
+        try:
+            text, language_code, duration_sec, language_prob = await _remote_try()
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                "[core] remote transcribed message_id=%s duration=%.2fs bytes=%d chars=%d lang=%s prob=%.2f audiodur=%.2fs",
+                msg.id,
+                elapsed,
+                len(voice_msg_bytes),
+                len(text),
+                language_code,
+                language_prob,
+                duration_sec,
+            )
+            return (text, language_code, duration_sec, language_prob)
+        except Exception as e:
+            logger.warning("[core] remote offload failed, falling back to local: %s", e)
+
+    # Local transcription path
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(voice_msg_bytes)
         tmp_path = tmp.name
@@ -418,10 +493,8 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
                 beam_size=5,
                 word_timestamps=PARA_ENABLED and WORD_TIMINGS_ENABLED,
             )
-            # Materialize generator so we can traverse multiple times
             seg_list = [s for s in segments_iter if getattr(s, 'text', None)]
             if PARA_ENABLED:
-                # Prefer word-level grouping if available
                 words: list = []
                 if WORD_TIMINGS_ENABLED:
                     for seg in seg_list:
@@ -430,6 +503,8 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
                             words.extend(seg_words)
                 if words:
                     text_out = _format_paragraphs_words(words)
+                else:
+                    text_out = " ".join(getattr(s, 'text', '').strip() for s in seg_list if getattr(s, 'text', None)).strip()
             else:
                 text_out = " ".join(getattr(s, 'text', '').strip() for s in seg_list if getattr(s, 'text', None)).strip()
             language_code = getattr(info, 'language', 'unknown')
@@ -444,7 +519,7 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
             pass
     elapsed = time.perf_counter() - t0
     logger.info(
-        "[core] transcribed message_id=%s duration=%.2fs bytes=%d chars=%d lang=%s prob=%.2f audiodur=%.2fs direct_input=%s",
+        "[core] local transcribed message_id=%s duration=%.2fs bytes=%d chars=%d lang=%s prob=%.2f audiodur=%.2fs direct_input=%s",
         msg.id,
         elapsed,
         len(voice_msg_bytes),
