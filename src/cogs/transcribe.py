@@ -32,9 +32,9 @@ Optional tuning via env vars:
 PARA_ENABLED = os.getenv("WHISPER_PARAGRAPHS", "1") != "0"
 WORD_TIMINGS_ENABLED = os.getenv("WHISPER_WORD_TIMINGS", "1") != "0"
 try:
-    PARA_GAP = float(os.getenv("WHISPER_PARAGRAPH_GAP", "1.0"))
+    PARA_GAP = float(os.getenv("WHISPER_PARAGRAPH_GAP", "0.6"))
 except ValueError:
-    PARA_GAP = 1.0
+    PARA_GAP = 0.6
 try:
     PARA_MIN_LEN = int(os.getenv("WHISPER_PARAGRAPH_MIN_LEN", "40"))
 except ValueError:
