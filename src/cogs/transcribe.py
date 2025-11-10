@@ -339,8 +339,7 @@ def build_transcription_message(
     """
     author = message.author
     full_text = (transcribed_text or "(empty transcription)").strip()
-    PREVIEW_LIMIT = 600
-    FILE_THRESHOLD = 900
+    PREVIEW_LIMIT = 1850
 
     truncated = len(full_text) > PREVIEW_LIMIT
     preview = full_text[:PREVIEW_LIMIT]
@@ -372,12 +371,12 @@ def build_transcription_message(
     header = " | ".join(header_bits)
 
     quoted = quote_block(preview)
-    footer = "> (truncated, full transcript attached as file)" if (truncated or len(full_text) > FILE_THRESHOLD) else ""
+    footer = "> (truncated, full transcript attached as file)" if truncated else ""
     content = f"> **{header}**\n{quoted}\n{footer}"
 
     # File attachment logic
     file: typing.Optional[discord.File] = None
-    if truncated or len(full_text) > FILE_THRESHOLD:
+    if truncated:
         # Sanitize author and compose filename
         raw_author = author.name if isinstance(author.name, str) else str(author.id)
         author_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_author)[:32] or str(author.id)
