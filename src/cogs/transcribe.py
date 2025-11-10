@@ -18,6 +18,8 @@ from discord.ext import commands
 from faster_whisper import WhisperModel
 from dataclasses import dataclass
 import aiohttp
+import urllib.parse
+import types
 
 
 logger = logging.getLogger(__name__)
@@ -450,15 +452,49 @@ async def transcribe_msg(msg: discord.Message, model: WhisperModel) -> tuple[str
             filename=attachment.filename or f"audio{ext}",
             content_type=attachment.content_type or "application/octet-stream",
         )
+        req_url = REMOTE_ASR_URL
+        try:
+            parts = urllib.parse.urlsplit(req_url)
+            query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+            if PARA_ENABLED and WORD_TIMINGS_ENABLED:
+                query["word_timestamps"] = "1"
+            # keep beam_size untouched unless already provided by REMOTE_ASR_URL
+            req_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(query), parts.fragment))
+        except Exception:
+            pass
+
         timeout = aiohttp.ClientTimeout(total=REMOTE_ASR_TIMEOUT_TOTAL)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(REMOTE_ASR_URL, data=form, headers=headers) as resp:
+            async with session.post(req_url, data=form, headers=headers) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
                 text = (data.get("text") or "").strip() or "(empty transcription)"
                 language_code = data.get("language") or "unknown"
                 duration_sec = float(data.get("duration") or 0.0)
                 language_prob = float(data.get("language_probability") or 0.0)
+                # If paragraphing is enabled and segments with words are present, format locally
+                if PARA_ENABLED:
+                    segs = data.get("segments")
+                    words_list = []
+                    if isinstance(segs, list):
+                        for seg in segs:
+                            witems = seg.get("words") if isinstance(seg, dict) else None
+                            if isinstance(witems, list):
+                                for w in witems:
+                                    if isinstance(w, dict):
+                                        words_list.append(
+                                            types.SimpleNamespace(
+                                                word=w.get("word", ""),
+                                                start=w.get("start", None),
+                                                end=w.get("end", None),
+                                            )
+                                        )
+                    if words_list:
+                        try:
+                            text = _format_paragraphs_words(words_list)
+                        except Exception:
+                            # Fallback to server text if formatting fails
+                            pass
                 return text, language_code, duration_sec, language_prob
 
     # Try remote first (if configured); if any failure, fall back to local
