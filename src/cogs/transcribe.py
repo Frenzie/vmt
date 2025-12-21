@@ -341,7 +341,7 @@ def build_transcription_message(
     """
     author = message.author
     full_text = (transcribed_text or "(empty transcription)").strip()
-    PREVIEW_LIMIT = 1850
+    PREVIEW_LIMIT = 1700
 
     truncated = len(full_text) > PREVIEW_LIMIT
     preview = full_text[:PREVIEW_LIMIT]
